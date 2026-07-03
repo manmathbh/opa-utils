@@ -267,10 +267,17 @@ func (p *Processor) hasException(clusterName string, designator *identifiers.Por
 		if _, ok := attributes.GetLabels()[identifiers.AttributeContainerName]; ok {
 			return false
 		}
-		// otherwise, continue to check the base object. A non-empty objectSelector
-		// will not match the label-less base envelope, so an exception whose selector
-		// matched only a related object (never the base) is correctly not applied here
-		// — consistent with the same-object AND enforced in metadataHasException.
+		// A non-empty objectSelector is a workload-label axis, and the base
+		// RegoResponseVector envelope is not a real labeled workload. Evaluating the
+		// selector against its empty label set is unsafe: negative operators
+		// (DoesNotExist / NotIn) match an empty label set, so the fall-through would
+		// wrongly apply an exception even though no related workload satisfied the
+		// selector. Skip the base object entirely when a selector is present — the
+		// selector was already ANDed with the designator per related object above.
+		if selector != nil {
+			return false
+		}
+		// otherwise (no selector), continue to check the base object against the designator.
 	}
 	return p.metadataHasException(workload, attributes, failingContainerNames, selector)
 

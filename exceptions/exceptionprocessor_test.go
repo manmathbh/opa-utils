@@ -1839,3 +1839,67 @@ func TestHasException_RegoResponseVector_BaseFallthroughWithSelector(t *testing.
 	assert.False(t, p.hasException("", designator, vector, nil, selector),
 		"objectSelector must not cross-combine a related-object label match with a base-envelope designator match")
 }
+
+// TestHasException_RegoResponseVector_BaseFallthroughNegativeSelector pins the
+// fail-closed behavior for negative label-selector operators (DoesNotExist / NotIn).
+// Unlike a positive selector, a negative requirement matches an *empty* label set, so
+// it would spuriously pass against the label-less base envelope on fall-through. The
+// only real workload (a related object carrying env=prod) does not satisfy the
+// selector, so the finding must NOT be suppressed — the exception must not apply.
+func TestHasException_RegoResponseVector_BaseFallthroughNegativeSelector(t *testing.T) {
+	p := NewProcessor()
+
+	// Vector base name "web"; the single related object is a Deployment named "web"
+	// carrying env=prod. A name=web designator matches both the base envelope and the
+	// related object, so only the selector should keep the exception from applying.
+	vector := objectsenvelopes.NewRegoResponseVectorObject(map[string]interface{}{
+		"kind": "RegoResponseVector",
+		"name": "web",
+		"relatedObjects": []interface{}{
+			map[string]interface{}{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata": map[string]interface{}{
+					"name":      "web",
+					"namespace": "default",
+					"labels":    map[string]interface{}{"env": "prod"},
+				},
+			},
+		},
+	})
+
+	designator := &identifiers.PortalDesignator{
+		DesignatorType: identifiers.DesignatorAttributes,
+		Attributes:     map[string]string{identifiers.AttributeName: "web"},
+	}
+
+	testCases := []struct {
+		selector *armotypes.LabelSelector
+		desc     string
+	}{
+		{
+			desc: "DoesNotExist over a related workload that has the key",
+			selector: &armotypes.LabelSelector{MatchExpressions: []armotypes.LabelSelectorRequirement{
+				{Key: "env", Operator: metav1.LabelSelectorOpDoesNotExist},
+			}},
+		},
+		{
+			desc: "NotIn over a related workload whose value is excluded",
+			selector: &armotypes.LabelSelector{MatchExpressions: []armotypes.LabelSelectorRequirement{
+				{Key: "env", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"prod"}},
+			}},
+		},
+	}
+
+	for _, test := range testCases {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
+			t.Parallel()
+
+			selector, ok := parseObjectSelector(&armotypes.PostureExceptionPolicy{ObjectSelector: test.selector})
+			require.True(t, ok)
+			assert.False(t, p.hasException("", designator, vector, nil, selector),
+				"a negative objectSelector must not match the label-less base envelope on fall-through")
+		})
+	}
+}
