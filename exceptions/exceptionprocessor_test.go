@@ -122,6 +122,48 @@ func TestListRuleExceptions(t *testing.T) {
 
 }
 
+func TestListRuleExceptionsPreservesMatchingPolicyTuples(t *testing.T) {
+	p := NewProcessor()
+	exception := armotypes.PostureExceptionPolicy{
+		PosturePolicies: []armotypes.PosturePolicy{
+			{FrameworkName: "NSA", ControlID: "C-0034", RuleName: "R1"},
+			{FrameworkName: "MITRE", ControlID: "C-0034", RuleName: "R2"},
+		},
+	}
+
+	matched := p.ListRuleExceptions([]armotypes.PostureExceptionPolicy{exception}, "", "", "R1")
+
+	require.Len(t, matched, 1)
+	require.Len(t, matched[0].PosturePolicies, 1)
+	assert.Equal(t, armotypes.PosturePolicy{
+		FrameworkName: "NSA",
+		ControlID:     "C-0034",
+		RuleName:      "R1",
+	}, matched[0].PosturePolicies[0])
+	assert.Len(t, exception.PosturePolicies, 2, "filtering must not mutate the caller-owned exception")
+}
+
+func TestListRuleExceptionsPreservesGlobalPolicyRepresentations(t *testing.T) {
+	p := NewProcessor()
+	tests := []struct {
+		name     string
+		policies []armotypes.PosturePolicy
+	}{
+		{name: "nil posture policies", policies: nil},
+		{name: "empty posture policies", policies: []armotypes.PosturePolicy{}},
+		{name: "one empty posture policy", policies: []armotypes.PosturePolicy{{}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exception := armotypes.PostureExceptionPolicy{PosturePolicies: tt.policies}
+			matched := p.ListRuleExceptions([]armotypes.PostureExceptionPolicy{exception}, "MITRE", "C-0034", "R1")
+			require.Len(t, matched, 1)
+			assert.Equal(t, tt.policies, matched[0].PosturePolicies)
+		})
+	}
+}
+
 func TestListRuleExceptionsRegex(t *testing.T) {
 	p := NewProcessor()
 	exceptionPolicy := emptyPostureExceptionPolicyAlertOnlyMock()

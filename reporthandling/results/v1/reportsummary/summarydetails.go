@@ -13,7 +13,7 @@ func (summaryDetails *SummaryDetails) GetStatus() *helpersv1.Status {
 	if summaryDetails.Status == apis.StatusUnknown {
 		summaryDetails.CalculateStatus()
 	}
-	return helpersv1.NewStatus(summaryDetails.Status)
+	return statusWithControlSubStatuses(summaryDetails.Status, summaryDetails.Controls)
 }
 
 // GetScore return score
@@ -148,19 +148,24 @@ func (summaryDetails *SummaryDetails) ListResourcesIDs(l *helpersv1.AllLists) *h
 //
 // Updates any necessary info accordingly
 func (summaryDetails *SummaryDetails) AppendResourceResult(resourceResult *resourcesresults.Result) {
+	frameworksByControl := make(map[string][]string, len(summaryDetails.Controls))
+	for i := range summaryDetails.Frameworks {
+		for controlID := range summaryDetails.Frameworks[i].Controls {
+			frameworksByControl[controlID] = append(frameworksByControl[controlID], summaryDetails.Frameworks[i].GetName())
+		}
+	}
 
 	// update full-summary counter
-	updateControlsSummaryCounters(resourceResult, summaryDetails.Controls, nil)
+	updateAggregateControlsSummaryCounters(resourceResult, summaryDetails.Controls, frameworksByControl)
 
 	// update the summary’s severity counters
-	if resourceResult.GetStatus(nil).IsFailed() {
-		for _, resourceControl := range resourceResult.ListControls() {
-			if resourceControl.GetStatus(nil).IsFailed() {
-				control := summaryDetails.Controls.GetControl(EControlCriteriaID, resourceControl.GetID())
-				severityScore := control.GetScoreFactor()
-				severity := apis.ControlSeverityToString(severityScore)
-				summaryDetails.ResourcesSeverityCounters.Increase(severity, 1)
-			}
+	for _, resourceControl := range resourceResult.ListControls() {
+		filters := &helpersv1.Filters{FrameworkNames: frameworksByControl[resourceControl.GetID()]}
+		if resourceControl.GetStatus(filters).IsFailed() {
+			control := summaryDetails.Controls.GetControl(EControlCriteriaID, resourceControl.GetID())
+			severityScore := control.GetScoreFactor()
+			severity := apis.ControlSeverityToString(severityScore)
+			summaryDetails.ResourcesSeverityCounters.Increase(severity, 1)
 		}
 	}
 
@@ -186,15 +191,24 @@ func (summaryDetails *SummaryDetails) GetControlsSeverityCounters() ISeverityCou
 	return &summaryDetails.ControlsSeverityCounters
 }
 
+func updateAggregateControlsSummaryCounters(resourceResult *resourcesresults.Result, controls map[string]ControlSummary, frameworksByControl map[string][]string) {
+	updateControlsSummaryCountersWithFilter(resourceResult, controls, func(controlID string) *helpersv1.Filters {
+		return &helpersv1.Filters{FrameworkNames: frameworksByControl[controlID]}
+	})
+}
+
 func updateControlsSummaryCounters(resourceResult *resourcesresults.Result, controls map[string]ControlSummary, f *helpersv1.Filters) {
+	updateControlsSummaryCountersWithFilter(resourceResult, controls, func(string) *helpersv1.Filters { return f })
+}
+
+func updateControlsSummaryCountersWithFilter(resourceResult *resourcesresults.Result, controls map[string]ControlSummary, filtersForControl func(string) *helpersv1.Filters) {
 	// update controls counters
 	for i := range resourceResult.AssociatedControls {
 		controlID := resourceResult.AssociatedControls[i].ControlID
 		if controlSummary, ok := controls[controlID]; ok {
-			subStatus := resourceResult.AssociatedControls[i].GetSubStatus()
-			status := resourceResult.AssociatedControls[i].GetStatus(f)
+			status := resourceResult.AssociatedControls[i].GetStatus(filtersForControl(controlID))
 			controlSummary.Append(status, resourceResult.ResourceID)
-			controlSummary.calculateStatus(subStatus)
+			controlSummary.calculateStatus(status.GetSubStatus())
 			controls[controlID] = controlSummary
 		}
 	}

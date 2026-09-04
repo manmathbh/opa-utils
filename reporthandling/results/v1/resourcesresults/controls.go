@@ -59,7 +59,7 @@ func (control *ResourceAssociatedControl) rulesStatus(f *helpersv1.Filters) apis
 	status := apis.StatusPassed
 	subStatus := apis.SubStatusUnknown
 	for i := range control.ResourceAssociatedRules {
-		ruleStatus := control.ResourceAssociatedRules[i].GetStatus(f)
+		ruleStatus := control.ResourceAssociatedRules[i].getStatus(f, control.GetID())
 		status, subStatus = apis.CompareStatusAndSubStatus(status, ruleStatus.Status(), subStatus, ruleStatus.GetSubStatus())
 	}
 	return &apis.StatusInfo{
@@ -70,18 +70,19 @@ func (control *ResourceAssociatedControl) rulesStatus(f *helpersv1.Filters) apis
 }
 
 func (control *ResourceAssociatedControl) applyActionRequiredStatus(status apis.IStatus) apis.IStatus {
+	actionRequired := control.effectiveActionRequired()
 	if status.Status() == apis.StatusFailed {
-		switch control.actionRequired {
+		switch actionRequired {
 		case apis.SubStatusRequiresReview, apis.SubStatusManualReview:
 			return &apis.StatusInfo{
 				InnerStatus: apis.StatusSkipped,
-				SubStatus:   control.actionRequired,
-				InnerInfo:   apis.SubStatusInfo(control.actionRequired),
+				SubStatus:   actionRequired,
+				InnerInfo:   apis.SubStatusInfo(actionRequired),
 			}
 		}
 	}
 
-	if control.actionRequired == apis.SubStatusConfiguration &&
+	if actionRequired == apis.SubStatusConfiguration &&
 		controlMissingAllConfigurations(control) && status.GetSubStatus() != apis.SubStatusNotEvaluated {
 		return &apis.StatusInfo{
 			InnerStatus: apis.StatusSkipped,
@@ -91,6 +92,19 @@ func (control *ResourceAssociatedControl) applyActionRequiredStatus(status apis.
 	}
 
 	return status
+}
+
+func (control *ResourceAssociatedControl) effectiveActionRequired() apis.ScanningSubStatus {
+	if control.actionRequired != apis.SubStatusUnknown {
+		return control.actionRequired
+	}
+
+	switch control.Status.SubStatus {
+	case apis.SubStatusConfiguration, apis.SubStatusManualReview, apis.SubStatusRequiresReview:
+		return control.Status.SubStatus
+	default:
+		return apis.SubStatusUnknown
+	}
 }
 
 // SetStatus set control status and sub status

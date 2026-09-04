@@ -20,10 +20,16 @@ func (result *Result) GetResourceID() string {
 // Status get resource status
 func (result *Result) GetStatus(f *helpersv1.Filters) apis.IStatus {
 	status := apis.StatusUnknown // Resource was not tested
+	subStatus := apis.SubStatusUnknown
 	for i := range result.AssociatedControls {
-		status = apis.Compare(status, result.AssociatedControls[i].GetStatus(f).Status())
+		controlStatus := result.AssociatedControls[i].GetStatus(f)
+		status, subStatus = apis.CompareStatusAndSubStatus(status, controlStatus.Status(), subStatus, controlStatus.GetSubStatus())
 	}
-	return helpersv1.NewStatus(status)
+	return &apis.StatusInfo{
+		InnerStatus: status,
+		SubStatus:   subStatus,
+		InnerInfo:   apis.SubStatusInfo(subStatus),
+	}
 }
 
 // ================================= Listing ==================================

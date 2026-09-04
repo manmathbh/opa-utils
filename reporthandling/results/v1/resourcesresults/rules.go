@@ -2,6 +2,7 @@ package resourcesresults
 
 import (
 	"github.com/armosec/armoapi-go/armotypes"
+	"github.com/kubescape/opa-utils/exceptions"
 	"github.com/kubescape/opa-utils/reporthandling/apis"
 	helpersv1 "github.com/kubescape/opa-utils/reporthandling/helpers/v1"
 )
@@ -20,19 +21,49 @@ func (rule *ResourceAssociatedRule) SetName(n string) {
 
 // GetStatus get rule status
 func (rule *ResourceAssociatedRule) GetStatus(f *helpersv1.Filters) apis.IStatus {
+	return rule.getStatus(f, "")
+}
+
+func (rule *ResourceAssociatedRule) getStatus(f *helpersv1.Filters, controlID string) apis.IStatus {
 	if rule.Status != apis.StatusFailed {
 		return rule.statusInfo()
 	}
 
-	exceptions := rule.Exception
+	frameworkNames := []string(nil)
 	if f != nil {
-		exceptions = f.FilterExceptions(exceptions)
+		frameworkNames = f.ListFrameworkNames()
 	}
-	if len(exceptions) > 0 {
+
+	if len(frameworkNames) == 0 {
+		return rule.statusWithExceptions(exceptions.FilterExceptionsByFrameworks(rule.Exception, nil, controlID, rule.GetName()))
+	}
+
+	status := apis.StatusUnknown
+	subStatus := apis.SubStatusUnknown
+	seenFrameworks := make(map[string]struct{}, len(frameworkNames))
+	for _, frameworkName := range frameworkNames {
+		if _, ok := seenFrameworks[frameworkName]; ok {
+			continue
+		}
+		seenFrameworks[frameworkName] = struct{}{}
+
+		frameworkStatus := rule.statusWithExceptions(exceptions.FilterExceptionsByFrameworks(rule.Exception, []string{frameworkName}, controlID, rule.GetName()))
+		status, subStatus = apis.CompareStatusAndSubStatus(status, frameworkStatus.Status(), subStatus, frameworkStatus.GetSubStatus())
+	}
+
+	return &apis.StatusInfo{
+		InnerStatus: status,
+		SubStatus:   subStatus,
+		InnerInfo:   apis.SubStatusInfo(subStatus),
+	}
+}
+
+func (rule *ResourceAssociatedRule) statusWithExceptions(matchingExceptions []armotypes.PostureExceptionPolicy) apis.IStatus {
+	if len(matchingExceptions) > 0 {
 		// An alertOnly exception acknowledges the finding without suppressing it, so
 		// the rule keeps failing and still counts against the compliance score. Only
 		// a disable action removes the finding from the results.
-		if allExceptionsAlertOnly(exceptions) {
+		if allExceptionsAlertOnly(matchingExceptions) {
 			return &apis.StatusInfo{
 				InnerStatus: apis.StatusFailed,
 				SubStatus:   apis.SubStatusException,

@@ -26,6 +26,18 @@ type Processor struct {
 	designatorCache *designatorCache
 }
 
+// posturePolicyProcessor owns the concurrency-safe regexp cache used by status
+// views. It deliberately has no designator cache because posture-policy tuple
+// filtering does not inspect resource designators.
+var posturePolicyProcessor = &Processor{comparator: newComparator()}
+
+type posturePolicyMatch struct {
+	frameworkNames []string
+	matchFramework bool
+	controlID      string
+	ruleName       string
+}
+
 func NewProcessor() *Processor {
 	return &Processor{
 		comparator:      newComparator(),
@@ -81,11 +93,50 @@ func (p *Processor) SetRuleResponsExceptions(results []reporthandling.RuleRespon
 }
 
 func (p *Processor) ListRuleExceptions(exceptionPolicies []armotypes.PostureExceptionPolicy, frameworkName, controlID, ruleName string) []armotypes.PostureExceptionPolicy {
+	match := posturePolicyMatch{
+		matchFramework: frameworkName != "",
+		controlID:      controlID,
+		ruleName:       ruleName,
+	}
+	if match.matchFramework {
+		match.frameworkNames = []string{frameworkName}
+	}
+	return p.filterPostureExceptions(exceptionPolicies, match)
+}
+
+// FilterExceptionsByFrameworks uses the shared posture-policy matcher without
+// allocating a full resource exception processor for each result status view.
+// It returns copies containing only tuples applicable to frameworkNames; an
+// empty frameworkNames slice selects framework-agnostic policies.
+func FilterExceptionsByFrameworks(exceptionPolicies []armotypes.PostureExceptionPolicy, frameworkNames []string, controlID, ruleName string) []armotypes.PostureExceptionPolicy {
+	return posturePolicyProcessor.filterPostureExceptions(exceptionPolicies, posturePolicyMatch{
+		frameworkNames: frameworkNames,
+		matchFramework: true,
+		controlID:      controlID,
+		ruleName:       ruleName,
+	})
+}
+
+func (p *Processor) filterPostureExceptions(exceptionPolicies []armotypes.PostureExceptionPolicy, match posturePolicyMatch) []armotypes.PostureExceptionPolicy {
 	ruleExceptions := make([]armotypes.PostureExceptionPolicy, 0, len(exceptionPolicies))
 
 	for i := range exceptionPolicies {
-		if p.ruleHasExceptions(&exceptionPolicies[i], frameworkName, controlID, ruleName) {
+		if len(exceptionPolicies[i].PosturePolicies) == 0 {
 			ruleExceptions = append(ruleExceptions, exceptionPolicies[i])
+			continue
+		}
+
+		matchingPolicies := make([]armotypes.PosturePolicy, 0, len(exceptionPolicies[i].PosturePolicies))
+		for j := range exceptionPolicies[i].PosturePolicies {
+			if p.posturePolicyMatches(&exceptionPolicies[i].PosturePolicies[j], match) {
+				matchingPolicies = append(matchingPolicies, exceptionPolicies[i].PosturePolicies[j])
+			}
+		}
+
+		if len(matchingPolicies) > 0 {
+			filteredException := exceptionPolicies[i]
+			filteredException.PosturePolicies = matchingPolicies
+			ruleExceptions = append(ruleExceptions, filteredException)
 		}
 	}
 
@@ -93,30 +144,27 @@ func (p *Processor) ListRuleExceptions(exceptionPolicies []armotypes.PostureExce
 
 }
 
-func (p *Processor) ruleHasExceptions(exceptionPolicy *armotypes.PostureExceptionPolicy, frameworkName, controlID, ruleName string) bool {
-	if len(exceptionPolicy.PosturePolicies) == 0 {
-		return true // empty policy -> apply all
+func (p *Processor) posturePolicyMatches(posturePolicy *armotypes.PosturePolicy, match posturePolicyMatch) bool {
+	if match.matchFramework && posturePolicy.FrameworkName != "" {
+		frameworkMatches := false
+		for _, frameworkName := range match.frameworkNames {
+			if strings.EqualFold(posturePolicy.FrameworkName, frameworkName) || p.regexCompareI(posturePolicy.FrameworkName, frameworkName) {
+				frameworkMatches = true
+				break
+			}
+		}
+		if !frameworkMatches {
+			return false
+		}
+	}
+	if posturePolicy.ControlID != "" && match.controlID != "" && !(strings.EqualFold(posturePolicy.ControlID, match.controlID) || p.regexCompareI(posturePolicy.ControlID, match.controlID)) {
+		return false
+	}
+	if posturePolicy.RuleName != "" && match.ruleName != "" && !(strings.EqualFold(posturePolicy.RuleName, match.ruleName) || p.regexCompareI(posturePolicy.RuleName, match.ruleName)) {
+		return false
 	}
 
-	for _, posturePolicy := range exceptionPolicy.PosturePolicies {
-		if posturePolicy.FrameworkName == "" && posturePolicy.ControlID == "" && posturePolicy.RuleName == "" {
-			return true // empty policy -> apply all
-		}
-		if posturePolicy.FrameworkName != "" && frameworkName != "" && !(strings.EqualFold(posturePolicy.FrameworkName, frameworkName) || p.regexCompareI(posturePolicy.FrameworkName, frameworkName)) {
-			continue // policy does not match
-		}
-		if posturePolicy.ControlID != "" && controlID != "" && !(strings.EqualFold(posturePolicy.ControlID, controlID) || p.regexCompareI(posturePolicy.ControlID, controlID)) {
-			continue // policy does not match
-		}
-		if posturePolicy.RuleName != "" && ruleName != "" && !(strings.EqualFold(posturePolicy.RuleName, ruleName) || p.regexCompareI(posturePolicy.RuleName, ruleName)) {
-			continue // policy does not match
-		}
-
-		return true // policies match
-	}
-
-	return false
-
+	return true
 }
 
 func alertObjectToWorkloads(obj *reporthandling.AlertObject) []workloadinterface.IMetadata {
