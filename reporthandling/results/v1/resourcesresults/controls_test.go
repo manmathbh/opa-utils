@@ -163,6 +163,52 @@ func TestFilteredControlStatusPreservesActionRequired(t *testing.T) {
 	}
 }
 
+func TestFilteredControlStatusPreservesActionRequiredAfterJSONRoundTrip(t *testing.T) {
+	exception := armotypes.PostureExceptionPolicy{
+		Actions:         []armotypes.PostureExceptionPolicyActions{armotypes.Disable},
+		PosturePolicies: []armotypes.PosturePolicy{{FrameworkName: "NSA", ControlID: "C-0034", RuleName: "R1"}},
+	}
+	tests := []struct {
+		name             string
+		action           *reporthandling.Control
+		wantNSA          apis.ScanningStatus
+		wantNSASubStatus apis.ScanningSubStatus
+		wantMITRE        apis.ScanningStatus
+		wantMITRESubstat apis.ScanningSubStatus
+	}{
+		{"requires review", mockControlWithActionRequiredRequiresReview(), apis.StatusPassed, apis.SubStatusException, apis.StatusSkipped, apis.SubStatusRequiresReview},
+		{"manual review", mockControlWithActionRequiredManualReview(), apis.StatusPassed, apis.SubStatusException, apis.StatusSkipped, apis.SubStatusManualReview},
+		{"configuration", mockControlWithActionRequiredConfiguration(), apis.StatusSkipped, apis.SubStatusConfiguration, apis.StatusSkipped, apis.SubStatusConfiguration},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			control := ResourceAssociatedControl{
+				ControlID: "C-0034",
+				ResourceAssociatedRules: []ResourceAssociatedRule{{
+					Name: "R1", Status: apis.StatusFailed, Exception: []armotypes.PostureExceptionPolicy{exception},
+				}},
+			}
+			control.SetStatus(*tt.action)
+
+			payload, err := json.Marshal(control)
+			assert.NoError(t, err)
+			assert.NotContains(t, string(payload), "actionRequired")
+
+			var roundTripped ResourceAssociatedControl
+			assert.NoError(t, json.Unmarshal(payload, &roundTripped))
+
+			nsa := roundTripped.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"NSA"}})
+			assert.Equal(t, tt.wantNSA, nsa.Status())
+			assert.Equal(t, tt.wantNSASubStatus, nsa.GetSubStatus())
+
+			mitre := roundTripped.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"MITRE"}})
+			assert.Equal(t, tt.wantMITRE, mitre.Status())
+			assert.Equal(t, tt.wantMITRESubstat, mitre.GetSubStatus())
+		})
+	}
+}
+
 func TestOldControlFrameworkStatusDoesNotMutateRules(t *testing.T) {
 	control := ResourceAssociatedControl{ResourceAssociatedRules: []ResourceAssociatedRule{{
 		Status: apis.StatusFailed,
@@ -174,6 +220,36 @@ func TestOldControlFrameworkStatusDoesNotMutateRules(t *testing.T) {
 	assert.Equal(t, apis.StatusPassed, control.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"NSA"}}).Status())
 	assert.Equal(t, apis.StatusFailed, control.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"MITRE"}}).Status())
 	assert.Equal(t, apis.StatusFailed, control.ResourceAssociatedRules[0].Status)
+}
+
+func TestOldControlJSONPreservesExceptionTupleCorrelation(t *testing.T) {
+	legacyControl := ResourceAssociatedControl{
+		ControlID: "C-0034",
+		ResourceAssociatedRules: []ResourceAssociatedRule{{
+			Name: "R1", Status: apis.StatusFailed,
+			Exception: []armotypes.PostureExceptionPolicy{{
+				Actions: []armotypes.PostureExceptionPolicyActions{armotypes.Disable},
+				PosturePolicies: []armotypes.PosturePolicy{
+					{FrameworkName: "NSA", ControlID: "C-0034", RuleName: "R1"},
+					{FrameworkName: "MITRE", ControlID: "C-0034", RuleName: "R2"},
+				},
+			}},
+		}},
+	}
+
+	payload, err := json.Marshal(legacyControl)
+	assert.NoError(t, err)
+	var decoded ResourceAssociatedControl
+	assert.NoError(t, json.Unmarshal(payload, &decoded))
+	assert.Len(t, decoded.ResourceAssociatedRules[0].Exception[0].PosturePolicies, 2, "legacy JSON remains unpruned on disk")
+
+	nsa := decoded.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"NSA"}})
+	assert.Equal(t, apis.StatusPassed, nsa.Status())
+	assert.Equal(t, apis.SubStatusException, nsa.GetSubStatus())
+
+	mitre := decoded.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"MITRE"}})
+	assert.Equal(t, apis.StatusFailed, mitre.Status(), "MITRE/R2 must not except MITRE/R1")
+	assert.Equal(t, apis.SubStatusUnknown, mitre.GetSubStatus())
 }
 
 func TestSetStatusAddsSubStatusInfo(t *testing.T) {

@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/armosec/armoapi-go/armotypes"
+	"github.com/kubescape/k8s-interface/workloadinterface"
+	"github.com/kubescape/opa-utils/reporthandling"
 	"github.com/kubescape/opa-utils/reporthandling/apis"
+	helpersv1 "github.com/kubescape/opa-utils/reporthandling/helpers/v1"
 	"github.com/kubescape/opa-utils/reporthandling/results/v1/resourcesresults"
 	"github.com/stretchr/testify/assert"
 )
@@ -468,6 +472,148 @@ func TestSummaryDetails_AppendResourceResult(t *testing.T) {
 	assert.Equal(t, 1, fw.StatusCounters.Skipped())
 
 	assert.Truef(t, fw.GetStatus().IsSkipped(), "framework status is \"%s\"", fw.GetStatus().Status())
+}
+
+func TestFrameworkScopedExceptionEndToEnd(t *testing.T) {
+	newSummary := func() *SummaryDetails {
+		newControl := func() ControlSummary {
+			return ControlSummary{ControlID: "C-0034", Name: "shared control"}
+		}
+		return &SummaryDetails{
+			Controls: ControlSummaries{"C-0034": newControl()},
+			Frameworks: []FrameworkSummary{
+				{Name: "NSA", Controls: ControlSummaries{"C-0034": newControl()}},
+				{Name: "MITRE", Controls: ControlSummaries{"C-0034": newControl()}},
+			},
+		}
+	}
+
+	exception := armotypes.PostureExceptionPolicy{
+		Actions: []armotypes.PostureExceptionPolicyActions{armotypes.Disable},
+		PosturePolicies: []armotypes.PosturePolicy{{
+			FrameworkName: "NSA", ControlID: "C-0034", RuleName: "R1",
+		}},
+	}
+	result := resourcesresults.Result{
+		ResourceID: "apps/v1/default/deployment/example",
+		AssociatedControls: []resourcesresults.ResourceAssociatedControl{{
+			ControlID: "C-0034",
+			Status:    apis.StatusInfo{InnerStatus: apis.StatusFailed},
+			ResourceAssociatedRules: []resourcesresults.ResourceAssociatedRule{{
+				Name: "R1", Status: apis.StatusFailed,
+			}},
+		}},
+	}
+	result.SetExceptions(
+		workloadinterface.NewWorkloadMock(nil),
+		[]armotypes.PostureExceptionPolicy{exception},
+		"",
+		map[string]reporthandling.Control{"C-0034": {}},
+	)
+
+	assert.Equal(t, apis.StatusFailed, result.AssociatedControls[0].ResourceAssociatedRules[0].Status)
+	assertResultView := func(t *testing.T, result *resourcesresults.Result, filters *helpersv1.Filters, expectedStatus apis.ScanningStatus, expectedSubStatus apis.ScanningSubStatus) {
+		t.Helper()
+		ruleStatus := result.AssociatedControls[0].ResourceAssociatedRules[0].GetStatus(filters)
+		controlStatus := result.AssociatedControls[0].GetStatus(filters)
+		resourceStatus := result.GetStatus(filters)
+		for level, status := range map[string]apis.IStatus{
+			"rule": ruleStatus, "control": controlStatus, "resource": resourceStatus,
+		} {
+			assert.Equal(t, expectedStatus, status.Status(), level)
+			assert.Equal(t, expectedSubStatus, status.GetSubStatus(), level)
+		}
+	}
+
+	nsaFilter := &helpersv1.Filters{FrameworkNames: []string{"NSA"}}
+	mitreFilter := &helpersv1.Filters{FrameworkNames: []string{"MITRE"}}
+	aggregateFilter := &helpersv1.Filters{FrameworkNames: []string{"NSA", "MITRE"}}
+	assertResultView(t, &result, nsaFilter, apis.StatusPassed, apis.SubStatusException)
+	assertResultView(t, &result, mitreFilter, apis.StatusFailed, apis.SubStatusUnknown)
+	assertResultView(t, &result, aggregateFilter, apis.StatusFailed, apis.SubStatusException)
+
+	payload, err := json.Marshal(result)
+	assert.NoError(t, err)
+	var roundTripped resourcesresults.Result
+	assert.NoError(t, json.Unmarshal(payload, &roundTripped))
+	assertResultView(t, &roundTripped, nsaFilter, apis.StatusPassed, apis.SubStatusException)
+	assertResultView(t, &roundTripped, mitreFilter, apis.StatusFailed, apis.SubStatusUnknown)
+	assertResultView(t, &roundTripped, aggregateFilter, apis.StatusFailed, apis.SubStatusException)
+
+	summary := newSummary()
+	summary.AppendResourceResult(&roundTripped)
+	summary.InitResourcesSummary(nil)
+
+	assertSummary := func(t *testing.T, summary *SummaryDetails) {
+		t.Helper()
+		aggregateControl := summary.Controls["C-0034"]
+		aggregate := aggregateControl.GetStatus()
+		assert.Equal(t, apis.StatusFailed, aggregate.Status())
+		assert.Equal(t, apis.SubStatusException, aggregate.GetSubStatus())
+		assert.Equal(t, apis.StatusFailed, summary.GetStatus().Status())
+		assert.Equal(t, apis.SubStatusException, summary.GetStatus().GetSubStatus())
+
+		nsaControl := summary.Frameworks[0].Controls["C-0034"]
+		nsa := nsaControl.GetStatus()
+		assert.Equal(t, apis.StatusPassed, nsa.Status())
+		assert.Equal(t, apis.SubStatusException, nsa.GetSubStatus())
+		assert.Equal(t, apis.StatusPassed, summary.Frameworks[0].GetStatus().Status())
+		assert.Equal(t, apis.SubStatusException, summary.Frameworks[0].GetStatus().GetSubStatus())
+
+		mitreControl := summary.Frameworks[1].Controls["C-0034"]
+		mitre := mitreControl.GetStatus()
+		assert.Equal(t, apis.StatusFailed, mitre.Status())
+		assert.Equal(t, apis.SubStatusUnknown, mitre.GetSubStatus())
+		assert.Equal(t, apis.StatusFailed, summary.Frameworks[1].GetStatus().Status())
+		assert.Equal(t, apis.SubStatusUnknown, summary.Frameworks[1].GetStatus().GetSubStatus())
+	}
+	assertSummary(t, summary)
+
+	summaryPayload, err := json.Marshal(summary)
+	assert.NoError(t, err)
+	var roundTrippedSummary SummaryDetails
+	assert.NoError(t, json.Unmarshal(summaryPayload, &roundTrippedSummary))
+	roundTrippedSummary.CalculateStatus()
+	for i := range roundTrippedSummary.Frameworks {
+		roundTrippedSummary.Frameworks[i].CalculateStatus()
+	}
+	assertSummary(t, &roundTrippedSummary)
+}
+
+func TestAggregateUsesOnlyFrameworksContainingControl(t *testing.T) {
+	controlSummary := ControlSummary{ControlID: "C-0034", Name: "NSA-only control"}
+	summary := &SummaryDetails{
+		Controls: ControlSummaries{"C-0034": controlSummary},
+		Frameworks: []FrameworkSummary{
+			{Name: "NSA", Controls: ControlSummaries{"C-0034": controlSummary}},
+			{Name: "MITRE", Controls: ControlSummaries{}},
+		},
+	}
+	result := resourcesresults.Result{
+		ResourceID: "apps/v1/default/deployment/example",
+		AssociatedControls: []resourcesresults.ResourceAssociatedControl{{
+			ControlID: "C-0034",
+			Status:    apis.StatusInfo{InnerStatus: apis.StatusFailed},
+			ResourceAssociatedRules: []resourcesresults.ResourceAssociatedRule{{
+				Name:   "R1",
+				Status: apis.StatusFailed,
+				Exception: []armotypes.PostureExceptionPolicy{{
+					Actions: []armotypes.PostureExceptionPolicyActions{armotypes.Disable},
+					PosturePolicies: []armotypes.PosturePolicy{{
+						FrameworkName: "NSA", ControlID: "C-0034", RuleName: "R1",
+					}},
+				}},
+			}},
+		}},
+	}
+
+	summary.AppendResourceResult(&result)
+	summary.InitResourcesSummary(nil)
+
+	aggregateControl := summary.Controls["C-0034"]
+	assert.Equal(t, apis.StatusPassed, aggregateControl.GetStatus().Status())
+	assert.Equal(t, apis.SubStatusException, aggregateControl.GetStatus().GetSubStatus())
+	assert.Equal(t, apis.StatusPassed, summary.GetStatus().Status())
 }
 
 func TestUpdateControlsSummaryCounters(t *testing.T) {

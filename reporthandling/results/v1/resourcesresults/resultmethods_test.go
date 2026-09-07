@@ -3,7 +3,9 @@ package resourcesresults
 import (
 	"testing"
 
+	"github.com/armosec/armoapi-go/armotypes"
 	"github.com/kubescape/opa-utils/reporthandling/apis"
+	helpersv1 "github.com/kubescape/opa-utils/reporthandling/helpers/v1"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -27,6 +29,27 @@ func TestResultStatus(t *testing.T) {
 	assert.False(t, r2.GetStatus(nil).IsFailed())
 	assert.False(t, r2.GetStatus(nil).IsSkipped())
 
+}
+
+func TestResultStatusPreservesEffectiveSubStatus(t *testing.T) {
+	result := Result{AssociatedControls: []ResourceAssociatedControl{{
+		ControlID: "C-0034",
+		Status:    apis.StatusInfo{InnerStatus: apis.StatusFailed},
+		ResourceAssociatedRules: []ResourceAssociatedRule{{
+			Name:   "R1",
+			Status: apis.StatusFailed,
+			Exception: []armotypes.PostureExceptionPolicy{{
+				Actions: []armotypes.PostureExceptionPolicyActions{armotypes.Disable},
+				PosturePolicies: []armotypes.PosturePolicy{{
+					FrameworkName: "NSA", ControlID: "C-0034", RuleName: "R1",
+				}},
+			}},
+		}},
+	}}}
+
+	status := result.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"NSA", "MITRE"}})
+	assert.Equal(t, apis.StatusFailed, status.Status())
+	assert.Equal(t, apis.SubStatusException, status.GetSubStatus())
 }
 
 func TestResultList(t *testing.T) {

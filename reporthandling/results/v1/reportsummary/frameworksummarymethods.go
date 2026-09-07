@@ -12,7 +12,7 @@ func (frameworkSummary *FrameworkSummary) GetStatus() apis.IStatus {
 	if frameworkSummary.Status == apis.StatusUnknown {
 		frameworkSummary.CalculateStatus()
 	}
-	return helpersv1.NewStatus(frameworkSummary.Status)
+	return statusWithControlSubStatuses(frameworkSummary.Status, frameworkSummary.Controls)
 }
 
 // SetStatus set the framework status based on the resource counters

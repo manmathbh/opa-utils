@@ -11,6 +11,12 @@ func NewStatus(status apis.ScanningStatus) *Status {
 	return &Status{status: status}
 }
 
+// NewStatusWithSubStatus creates a status view that includes its effective
+// substatus.
+func NewStatusWithSubStatus(status apis.ScanningStatus, subStatus apis.ScanningSubStatus) *Status {
+	return &Status{status: status, subStatus: subStatus}
+}
+
 func NewStatusInfo(status apis.ScanningStatus, subStatus apis.ScanningSubStatus, info string) *apis.StatusInfo {
 	return &apis.StatusInfo{
 		InnerStatus: status,

@@ -11,6 +11,7 @@ import (
 	"github.com/kubescape/opa-utils/reporthandling/apis"
 	helpersv1 "github.com/kubescape/opa-utils/reporthandling/helpers/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func mockExceptionDeploymentC0087() *armotypes.PostureExceptionPolicy {
@@ -194,8 +195,9 @@ func TestSetExceptionsKeepsRuleStatusForFrameworkScopedEvaluation(t *testing.T) 
 			rule := control.ResourceAssociatedRules[0]
 			assert.Equal(t, apis.StatusFailed, rule.Status, "exceptions must not overwrite the raw rule status")
 
-			assert.Equal(t, tt.expectedStatus, control.GetStatus(nil).Status())
-			assert.Equal(t, apis.SubStatusException, control.GetStatus(nil).GetSubStatus())
+			assert.Equal(t, apis.StatusFailed, control.GetStatus(nil).Status(),
+				"a framework-scoped exception must not suppress the raw/global view")
+			assert.Equal(t, apis.SubStatusUnknown, control.GetStatus(nil).GetSubStatus())
 
 			// The exception names NSA, so it applies there and nowhere else.
 			nsa := control.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"NSA"}})
@@ -208,4 +210,32 @@ func TestSetExceptionsKeepsRuleStatusForFrameworkScopedEvaluation(t *testing.T) 
 				"an exception scoped to another framework must not annotate this one")
 		})
 	}
+}
+
+func TestSetExceptionsPreservesPolicyTupleCorrelation(t *testing.T) {
+	w := workloadinterface.NewWorkloadMock(nil)
+	exception := armotypes.PostureExceptionPolicy{
+		Actions: []armotypes.PostureExceptionPolicyActions{armotypes.Disable},
+		PosturePolicies: []armotypes.PosturePolicy{
+			{FrameworkName: "NSA", ControlID: "C-0034", RuleName: "R1"},
+			{FrameworkName: "MITRE", ControlID: "C-0034", RuleName: "R2"},
+		},
+	}
+	result := Result{AssociatedControls: []ResourceAssociatedControl{{
+		ControlID: "C-0034",
+		Status:    apis.StatusInfo{InnerStatus: apis.StatusFailed},
+		ResourceAssociatedRules: []ResourceAssociatedRule{{
+			Name: "R1", Status: apis.StatusFailed,
+		}},
+	}}}
+
+	result.SetExceptions(w, []armotypes.PostureExceptionPolicy{exception}, "", map[string]reporthandling.Control{"C-0034": {}})
+
+	rule := result.AssociatedControls[0].ResourceAssociatedRules[0]
+	assert.Equal(t, apis.StatusPassed, rule.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"NSA"}}).Status())
+	assert.Equal(t, apis.StatusFailed, rule.GetStatus(&helpersv1.Filters{FrameworkNames: []string{"MITRE"}}).Status())
+	require.Len(t, rule.Exception, 1)
+	require.Len(t, rule.Exception[0].PosturePolicies, 1)
+	assert.Equal(t, "NSA", rule.Exception[0].PosturePolicies[0].FrameworkName)
+	assert.Len(t, exception.PosturePolicies, 2, "SetExceptions must not mutate the caller-owned exception")
 }
