@@ -327,7 +327,11 @@ func (p *Processor) metadataHasException(workload workloadinterface.IMetadata, a
 	// labels map even though it is a schema field rather than a Kubernetes label. Match it
 	// here, next to kind, and keep it out of the label comparison below: no resource carries
 	// a literal apiGroup label, so leaving it there makes the whole designator unmatchable.
-	if apiGroup := attributes.GetLabels()[identifiers.AttributeApiGroup]; apiGroup != "" && !p.compareApiGroup(workload, apiGroup) {
+	//
+	// Presence decides whether to compare, not emptiness. An explicit apiGroup: "" names the
+	// core group, and is a constraint like any other: gating on a non-empty value would drop
+	// it while still stripping the key, widening a core-only exception to every named group.
+	if apiGroup, ok := attributes.GetLabels()[identifiers.AttributeApiGroup]; ok && !p.compareApiGroup(workload, apiGroup) {
 		return false // api groups do not match
 	}
 

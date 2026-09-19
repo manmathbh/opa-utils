@@ -1637,6 +1637,66 @@ func TestGetResourceExceptions_ObjectSelector(t *testing.T) {
 	}
 }
 
+// TestGetResourceExceptions_ApiGroup exercises apiGroup through the public entry point,
+// covering the distinction between an absent key and one explicitly set to the empty string.
+// An absent apiGroup imposes no constraint; an explicit "" names the core group and has to
+// exclude resources from named groups, rather than being read as "no constraint".
+func TestGetResourceExceptions_ApiGroup(t *testing.T) {
+	p := NewProcessor()
+
+	pod := workloadinterface.NewWorkloadObj(podObject([]string{"app"}, nil))
+	deployment := workloadinterface.NewWorkloadObj(deploymentObject("apps/v1", nil))
+
+	testCases := []struct {
+		desc                    string
+		attributes              map[string]string
+		workloadObj             workloadinterface.IMetadata
+		expectedExceptionsCount int
+	}{
+		{
+			desc:                    "explicit empty apiGroup matches a core group resource",
+			attributes:              map[string]string{identifiers.AttributeApiGroup: ""},
+			workloadObj:             pod,
+			expectedExceptionsCount: 1,
+		},
+		{
+			desc:                    "explicit empty apiGroup does not match an apps/v1 resource",
+			attributes:              map[string]string{identifiers.AttributeApiGroup: ""},
+			workloadObj:             deployment,
+			expectedExceptionsCount: 0,
+		},
+		{
+			desc:                    "named apiGroup matches its own group",
+			attributes:              map[string]string{identifiers.AttributeApiGroup: "apps"},
+			workloadObj:             deployment,
+			expectedExceptionsCount: 1,
+		},
+		{
+			desc:                    "named apiGroup does not match a core group resource",
+			attributes:              map[string]string{identifiers.AttributeApiGroup: "apps"},
+			workloadObj:             pod,
+			expectedExceptionsCount: 0,
+		},
+		{
+			desc:                    "an absent apiGroup imposes no constraint",
+			attributes:              map[string]string{identifiers.AttributeNamespace: "default"},
+			workloadObj:             deployment,
+			expectedExceptionsCount: 1,
+		},
+	}
+
+	for _, test := range testCases {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
+			t.Parallel()
+
+			ex := postureObjectSelectorExceptionMock(test.attributes, nil)
+			res := p.GetResourceExceptions([]armotypes.PostureExceptionPolicy{*ex}, test.workloadObj, "test")
+			assert.Equal(t, test.expectedExceptionsCount, len(res))
+		})
+	}
+}
+
 // TestGetResourceExceptions_ObjectSelector_RegoResponseVector pins that the
 // objectSelector is evaluated against the *related* workload of a RegoResponseVector
 // (the real object), not the label-less vector envelope, and that the selector and
@@ -2063,6 +2123,27 @@ func TestMetadataHasException_ApiGroup(t *testing.T) {
 			workload:   pod,
 			attributes: map[string]string{identifiers.AttributeApiGroup: "apps"},
 			expected:   false,
+		},
+		{
+			name:       "an explicit empty apiGroup names the core group and matches a core resource",
+			workload:   pod,
+			attributes: map[string]string{identifiers.AttributeApiGroup: ""},
+			expected:   true,
+		},
+		{
+			name:       "an explicit empty apiGroup does not match a named group resource",
+			workload:   deployment,
+			attributes: map[string]string{identifiers.AttributeApiGroup: ""},
+			expected:   false,
+		},
+		{
+			name:     "an explicit empty apiGroup constrains an otherwise matching kind",
+			workload: deployment,
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "",
+				identifiers.AttributeKind:     "Deployment",
+			},
+			expected: false,
 		},
 		{
 			name:     "apiGroup alongside a real label that matches",
