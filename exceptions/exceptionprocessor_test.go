@@ -2175,3 +2175,69 @@ func TestMetadataHasException_ApiGroup(t *testing.T) {
 		})
 	}
 }
+
+// subjectGroupVector is a RegoResponseVector built from an RBAC subject. It carries a bare
+// apiGroup and no apiVersion, which is what distinguishes it from an ordinary workload.
+const subjectGroupVector = `{"apiGroup":"rbac.authorization.k8s.io","kind":"Group","name":"system:masters","relatedObjects":[{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"cluster-admin"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"apiGroup":"rbac.authorization.k8s.io","kind":"Group","name":"system:masters"}]}]}`
+
+// TestHasException_ApiGroup_RegoResponseVector covers the RBAC subject case, where
+// GetApiVersion returns a bare API group rather than a group/version pair. Splitting that as
+// an apiVersion yields no group, which silently stopped a correctly scoped subject exception
+// from matching.
+func TestHasException_ApiGroup_RegoResponseVector(t *testing.T) {
+	p := NewProcessor()
+
+	vector, err := objectsenvelopes.NewRegoResponseVectorObjectFromBytes([]byte(subjectGroupVector))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		attributes map[string]string
+		expected   bool
+	}{
+		{
+			name: "matching named group attaches",
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "rbac.authorization.k8s.io",
+				identifiers.AttributeKind:     "Group",
+				identifiers.AttributeName:     "system:masters",
+			},
+			expected: true,
+		},
+		{
+			name: "mismatched named group does not attach",
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "apps",
+				identifiers.AttributeKind:     "Group",
+				identifiers.AttributeName:     "system:masters",
+			},
+			expected: false,
+		},
+		{
+			name: "an explicit core group does not match a named group subject",
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "",
+				identifiers.AttributeKind:     "Group",
+				identifiers.AttributeName:     "system:masters",
+			},
+			expected: false,
+		},
+		{
+			name: "apiGroup alone attaches",
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "rbac.authorization.k8s.io",
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			designator := &identifiers.PortalDesignator{
+				DesignatorType: identifiers.DesignatorAttributes,
+				Attributes:     tt.attributes,
+			}
+			assert.Equal(t, tt.expected, p.hasException("test", designator, vector, nil, nil))
+		})
+	}
+}
