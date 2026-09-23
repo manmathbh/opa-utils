@@ -473,3 +473,56 @@ func TestIsTypeRegoResponseVector(t *testing.T) {
 		})
 	}
 }
+
+// deploymentObject builds a workload in a named API group, so apiGroup matching can be
+// exercised against something other than the core group.
+func deploymentObject(apiVersion string, labels map[string]string) map[string]interface{} {
+	metadata := map[string]interface{}{"name": "test-deploy", "namespace": "default"}
+	if labels != nil {
+		l := make(map[string]interface{}, len(labels))
+		for k, v := range labels {
+			l[k] = v
+		}
+		metadata["labels"] = l
+	}
+	return map[string]interface{}{
+		"apiVersion": apiVersion,
+		"kind":       "Deployment",
+		"metadata":   metadata,
+		"spec": map[string]interface{}{
+			"template": map[string]interface{}{
+				"spec": map[string]interface{}{
+					"containers": []interface{}{map[string]interface{}{"name": "app"}},
+				},
+			},
+		},
+	}
+}
+
+func TestComparator_compareApiGroup(t *testing.T) {
+	c := &comparator{}
+
+	deployment := workloadinterface.NewWorkloadObj(deploymentObject("apps/v1", nil))
+	pod := workloadinterface.NewWorkloadObj(podObject([]string{"app"}, nil))
+
+	tests := []struct {
+		name     string
+		workload workloadinterface.IMetadata
+		apiGroup string
+		expected bool
+	}{
+		{name: "group matches", workload: deployment, apiGroup: "apps", expected: true},
+		{name: "different group", workload: deployment, apiGroup: "batch", expected: false},
+		{name: "version is not part of the group", workload: deployment, apiGroup: "apps/v1", expected: false},
+		{name: "regex wildcard", workload: deployment, apiGroup: "app.*", expected: true},
+		{name: "match is case sensitive", workload: deployment, apiGroup: "Apps", expected: false},
+		{name: "core group resource has an empty group", workload: pod, apiGroup: "apps", expected: false},
+		{name: "core group matched by an empty pattern", workload: pod, apiGroup: "", expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, c.compareApiGroup(tt.workload, tt.apiGroup))
+		})
+	}
+}

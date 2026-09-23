@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/kubescape/k8s-interface/k8sinterface"
 	"github.com/kubescape/k8s-interface/workloadinterface"
 	"github.com/kubescape/opa-utils/objectsenvelopes"
 	"github.com/kubescape/opa-utils/objectsenvelopes/localworkload"
@@ -35,6 +36,32 @@ func (c *comparator) compareNamespace(workload workloadinterface.IMetadata, name
 
 func (c *comparator) compareKind(workload workloadinterface.IMetadata, kind string) bool {
 	return c.regexCompare(kind, workload.GetKind())
+}
+
+// compareApiGroup matches against the resource's API group. A core-group resource reports an
+// empty group, so it is matched only by a designator whose pattern accepts the empty string.
+func (c *comparator) compareApiGroup(workload workloadinterface.IMetadata, apiGroup string) bool {
+	return c.regexCompare(apiGroup, apiGroupOf(workload))
+}
+
+// apiGroupOf returns the resource's API group.
+//
+// Most objects carry a group/version apiVersion, and the group is its first half. A
+// RegoResponseVector built from an RBAC subject instead carries a bare apiGroup such as
+// "rbac.authorization.k8s.io" and no version at all, which GetApiVersion returns as-is;
+// SplitApiVersion reads a value with no "/" as a version and reports no group, which would
+// stop a correctly scoped subject exception from matching. The object's own apiGroup field
+// is authoritative where it has one, so it is preferred.
+func apiGroupOf(workload workloadinterface.IMetadata) string {
+	if value, ok := workloadinterface.InspectMap(workload.GetObject(), "apiGroup"); ok {
+		if group, isString := value.(string); isString {
+			return group
+		}
+	}
+
+	group, _ := k8sinterface.SplitApiVersion(workload.GetApiVersion())
+
+	return group
 }
 
 func (c *comparator) compareName(workload workloadinterface.IMetadata, name string) bool {

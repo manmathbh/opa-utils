@@ -2,6 +2,7 @@ package exceptions
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -370,6 +371,18 @@ func (p *Processor) metadataHasException(workload workloadinterface.IMetadata, a
 		return false // kinds do not match
 	}
 
+	// apiGroup has no case in armoapi-go's DigestAttributesDesignator, so it arrives in the
+	// labels map even though it is a schema field rather than a Kubernetes label. Match it
+	// here, next to kind, and keep it out of the label comparison below: no resource carries
+	// a literal apiGroup label, so leaving it there makes the whole designator unmatchable.
+	//
+	// Presence decides whether to compare, not emptiness. An explicit apiGroup: "" names the
+	// core group, and is a constraint like any other: gating on a non-empty value would drop
+	// it while still stripping the key, widening a core-only exception to every named group.
+	if apiGroup, ok := attributes.GetLabels()[identifiers.AttributeApiGroup]; ok && !p.compareApiGroup(workload, apiGroup) {
+		return false // api groups do not match
+	}
+
 	if attributes.GetName() != "" && !p.compareName(workload, attributes.GetName()) {
 		return false // names do not match
 	}
@@ -398,20 +411,12 @@ func (p *Processor) metadataHasException(workload workloadinterface.IMetadata, a
 		allLabels := attributes.GetLabels()
 		containerName, hasContainerName := allLabels[identifiers.AttributeContainerName]
 
-		// Build a label map with containerName stripped out so it is not
-		// treated as a Kubernetes label during label/annotation comparison.
-		labelsWithoutContainer := allLabels
-		if hasContainerName {
-			labelsWithoutContainer = make(map[string]string, len(allLabels)-1)
-			for k, v := range allLabels {
-				if k != identifiers.AttributeContainerName {
-					labelsWithoutContainer[k] = v
-				}
-			}
-		}
+		// Build a label map with the attributes that are not Kubernetes labels stripped out,
+		// so they are not compared as such.
+		realLabels := stripNonLabelAttributes(allLabels)
 
-		if len(labelsWithoutContainer) > 0 {
-			if !p.compareLabels(workload, labelsWithoutContainer) && !p.compareAnnotations(workload, labelsWithoutContainer) {
+		if len(realLabels) > 0 {
+			if !p.compareLabels(workload, realLabels) && !p.compareAnnotations(workload, realLabels) {
 				return false // labels nor annotations do not match
 			}
 		}
@@ -422,6 +427,38 @@ func (p *Processor) metadataHasException(workload workloadinterface.IMetadata, a
 	}
 
 	return true
+}
+
+// nonLabelAttributes are designator attribute keys that armoapi-go's
+// DigestAttributesDesignator has no case for, so they are collected into the labels map
+// even though they are schema fields rather than Kubernetes labels. Each one is matched
+// explicitly, and has to be removed before the label and annotation comparison: no resource
+// carries a literal containerName or apiGroup label, so comparing them as labels can only
+// fail, and would make the whole designator unmatchable.
+var nonLabelAttributes = []string{
+	identifiers.AttributeContainerName,
+	identifiers.AttributeApiGroup,
+}
+
+// stripNonLabelAttributes returns attributes without those keys, leaving the map untouched
+// when it holds none of them.
+func stripNonLabelAttributes(attributes map[string]string) map[string]string {
+	held := slices.ContainsFunc(nonLabelAttributes, func(key string) bool {
+		_, ok := attributes[key]
+		return ok
+	})
+	if !held {
+		return attributes
+	}
+
+	stripped := make(map[string]string, len(attributes))
+	for key, value := range attributes {
+		if !slices.Contains(nonLabelAttributes, key) {
+			stripped[key] = value
+		}
+	}
+
+	return stripped
 }
 
 func (p *Processor) iterateRegoResponseVector(workload workloadinterface.IMetadata, attributes identifiers.AttributesDesignators, failingContainerNames []string, selector labels.Selector) bool {

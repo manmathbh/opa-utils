@@ -1679,6 +1679,66 @@ func TestGetResourceExceptions_ObjectSelector(t *testing.T) {
 	}
 }
 
+// TestGetResourceExceptions_ApiGroup exercises apiGroup through the public entry point,
+// covering the distinction between an absent key and one explicitly set to the empty string.
+// An absent apiGroup imposes no constraint; an explicit "" names the core group and has to
+// exclude resources from named groups, rather than being read as "no constraint".
+func TestGetResourceExceptions_ApiGroup(t *testing.T) {
+	p := NewProcessor()
+
+	pod := workloadinterface.NewWorkloadObj(podObject([]string{"app"}, nil))
+	deployment := workloadinterface.NewWorkloadObj(deploymentObject("apps/v1", nil))
+
+	testCases := []struct {
+		desc                    string
+		attributes              map[string]string
+		workloadObj             workloadinterface.IMetadata
+		expectedExceptionsCount int
+	}{
+		{
+			desc:                    "explicit empty apiGroup matches a core group resource",
+			attributes:              map[string]string{identifiers.AttributeApiGroup: ""},
+			workloadObj:             pod,
+			expectedExceptionsCount: 1,
+		},
+		{
+			desc:                    "explicit empty apiGroup does not match an apps/v1 resource",
+			attributes:              map[string]string{identifiers.AttributeApiGroup: ""},
+			workloadObj:             deployment,
+			expectedExceptionsCount: 0,
+		},
+		{
+			desc:                    "named apiGroup matches its own group",
+			attributes:              map[string]string{identifiers.AttributeApiGroup: "apps"},
+			workloadObj:             deployment,
+			expectedExceptionsCount: 1,
+		},
+		{
+			desc:                    "named apiGroup does not match a core group resource",
+			attributes:              map[string]string{identifiers.AttributeApiGroup: "apps"},
+			workloadObj:             pod,
+			expectedExceptionsCount: 0,
+		},
+		{
+			desc:                    "an absent apiGroup imposes no constraint",
+			attributes:              map[string]string{identifiers.AttributeNamespace: "default"},
+			workloadObj:             deployment,
+			expectedExceptionsCount: 1,
+		},
+	}
+
+	for _, test := range testCases {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
+			t.Parallel()
+
+			ex := postureObjectSelectorExceptionMock(test.attributes, nil)
+			res := p.GetResourceExceptions([]armotypes.PostureExceptionPolicy{*ex}, test.workloadObj, "test")
+			assert.Equal(t, test.expectedExceptionsCount, len(res))
+		})
+	}
+}
+
 // TestGetResourceExceptions_ObjectSelector_RegoResponseVector pins that the
 // objectSelector is evaluated against the *related* workload of a RegoResponseVector
 // (the real object), not the label-less vector envelope, and that the selector and
@@ -2055,4 +2115,171 @@ func TestSetRuleResponsExceptions_EmptyResourcesMatchesEverywhere(t *testing.T) 
 
 	require.NotNil(t, results[0].Exception, "a scope-less exception must still be attached via SetRuleResponsExceptions")
 	assert.Equal(t, "scope-less", results[0].Exception.GetName())
+}
+
+// TestMetadataHasException_ApiGroup covers a SecurityException scoped by apiGroup.
+//
+// armoapi-go's DigestAttributesDesignator has no case for apiGroup, so it arrives in the
+// labels map. Comparing it as a Kubernetes label can only fail, since apiGroup is a schema
+// field and no resource carries a label by that name, which left every designator using it
+// unmatchable. Matching it explicitly has to both restore the match and keep apiGroup
+// constraining, rather than dropping it and widening the exception to every group.
+func TestMetadataHasException_ApiGroup(t *testing.T) {
+	p := NewProcessor()
+
+	deployment := workloadinterface.NewWorkloadObj(deploymentObject("apps/v1", map[string]string{"app": "test-app"}))
+	pod := workloadinterface.NewWorkloadObj(podObject([]string{"app"}, nil))
+
+	tests := []struct {
+		name       string
+		workload   workloadinterface.IMetadata
+		attributes map[string]string
+		expected   bool
+	}{
+		{
+			name:       "apiGroup alone matches",
+			workload:   deployment,
+			attributes: map[string]string{identifiers.AttributeApiGroup: "apps"},
+			expected:   true,
+		},
+		{
+			name:     "apiGroup with kind matches",
+			workload: deployment,
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "apps",
+				identifiers.AttributeKind:     "Deployment",
+			},
+			expected: true,
+		},
+		{
+			name:     "a different apiGroup still constrains a matching kind",
+			workload: deployment,
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "batch",
+				identifiers.AttributeKind:     "Deployment",
+			},
+			expected: false,
+		},
+		{
+			name:       "named group does not match a core group resource",
+			workload:   pod,
+			attributes: map[string]string{identifiers.AttributeApiGroup: "apps"},
+			expected:   false,
+		},
+		{
+			name:       "an explicit empty apiGroup names the core group and matches a core resource",
+			workload:   pod,
+			attributes: map[string]string{identifiers.AttributeApiGroup: ""},
+			expected:   true,
+		},
+		{
+			name:       "an explicit empty apiGroup does not match a named group resource",
+			workload:   deployment,
+			attributes: map[string]string{identifiers.AttributeApiGroup: ""},
+			expected:   false,
+		},
+		{
+			name:     "an explicit empty apiGroup constrains an otherwise matching kind",
+			workload: deployment,
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "",
+				identifiers.AttributeKind:     "Deployment",
+			},
+			expected: false,
+		},
+		{
+			name:     "apiGroup alongside a real label that matches",
+			workload: deployment,
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "apps",
+				"app":                         "test-app",
+			},
+			expected: true,
+		},
+		{
+			name:     "apiGroup alongside a real label that does not match",
+			workload: deployment,
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "apps",
+				"app":                         "other-app",
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			designator := &identifiers.PortalDesignator{
+				DesignatorType: identifiers.DesignatorAttributes,
+				Attributes:     tt.attributes,
+			}
+			assert.Equal(t, tt.expected, p.metadataHasException(tt.workload, designator.DigestPortalDesignator(), nil, nil))
+		})
+	}
+}
+
+// subjectGroupVector is a RegoResponseVector built from an RBAC subject. It carries a bare
+// apiGroup and no apiVersion, which is what distinguishes it from an ordinary workload.
+const subjectGroupVector = `{"apiGroup":"rbac.authorization.k8s.io","kind":"Group","name":"system:masters","relatedObjects":[{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"cluster-admin"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"apiGroup":"rbac.authorization.k8s.io","kind":"Group","name":"system:masters"}]}]}`
+
+// TestHasException_ApiGroup_RegoResponseVector covers the RBAC subject case, where
+// GetApiVersion returns a bare API group rather than a group/version pair. Splitting that as
+// an apiVersion yields no group, which silently stopped a correctly scoped subject exception
+// from matching.
+func TestHasException_ApiGroup_RegoResponseVector(t *testing.T) {
+	p := NewProcessor()
+
+	vector, err := objectsenvelopes.NewRegoResponseVectorObjectFromBytes([]byte(subjectGroupVector))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		attributes map[string]string
+		expected   bool
+	}{
+		{
+			name: "matching named group attaches",
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "rbac.authorization.k8s.io",
+				identifiers.AttributeKind:     "Group",
+				identifiers.AttributeName:     "system:masters",
+			},
+			expected: true,
+		},
+		{
+			name: "mismatched named group does not attach",
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "apps",
+				identifiers.AttributeKind:     "Group",
+				identifiers.AttributeName:     "system:masters",
+			},
+			expected: false,
+		},
+		{
+			name: "an explicit core group does not match a named group subject",
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "",
+				identifiers.AttributeKind:     "Group",
+				identifiers.AttributeName:     "system:masters",
+			},
+			expected: false,
+		},
+		{
+			name: "apiGroup alone attaches",
+			attributes: map[string]string{
+				identifiers.AttributeApiGroup: "rbac.authorization.k8s.io",
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			designator := &identifiers.PortalDesignator{
+				DesignatorType: identifiers.DesignatorAttributes,
+				Attributes:     tt.attributes,
+			}
+			assert.Equal(t, tt.expected, p.hasException("test", designator, vector, nil, nil))
+		})
+	}
 }
